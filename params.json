@@ -1,0 +1,11 @@
+{
+	"ctx_len": 256,
+	"n_layers": 12,
+	"embed": 360,
+	"vocab_size": 78,
+	"n_heads": 12,
+	"T": 4,
+	"batch_size": 1,
+	"lr": 1e-4,
+	"epoch": 8
+}
