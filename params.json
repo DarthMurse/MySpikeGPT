@@ -4,8 +4,8 @@
 	"embed": 360,
 	"vocab_size": 78,
 	"n_heads": 12,
-	"T": 4,
+	"T": 8,
 	"batch_size": 1,
-	"lr": 1e-4,
-	"epoch": 8
+	"lr": 1.5e-4,
+	"epoch": 4
 }

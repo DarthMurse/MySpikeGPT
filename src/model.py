@@ -44,9 +44,9 @@ class EncodingLayer(nn.Module):
                     self.poe[i, j] = math.cos(i / lamb ** ((j-1)/self.args.embed))
 
     def forward(self, x, cur_pos):
-        B, _ = x.shape
+        B, S = x.shape
         out = self.emb(x)
-        out = out + self.poe
+        out = out + self.poe[:S]
         out = out.unsqueeze(0).repeat(self.args.T, 1, 1, 1)
         out[:, :, :cur_pos, :] = nn.BatchNorm2d(B)(out[:, :, :cur_pos, :])
         return out

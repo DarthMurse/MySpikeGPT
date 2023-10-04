@@ -27,8 +27,9 @@ def BPC(model, valid_set, tokenizer, model_args=args):
 
 if __name__ == "__main__":
     model = MySpikeGPT()
+    checkpoint = torch.load("model/model.pth")
+    model.load_state_dict(checkpoint['model'])
     valid_set = EnwikiDataset("enwik8", "char_book.json", split="valid")
     tokenizer = MyTokenizer("char_book.json", args.ctx_len)
     loss = BPC(model, valid_set, tokenizer)
     print(loss)
-
