@@ -1,5 +1,5 @@
 {
-	"ctx_len": 256,
+	"ctx_len": 84,
 	"n_layers": 12,
 	"embed": 360,
 	"vocab_size": 79,

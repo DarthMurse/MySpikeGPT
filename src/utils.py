@@ -131,7 +131,14 @@ class EnwikiDataset(Dataset):
             for line in text:
                 if line.isspace():
                     continue 
-                self.text.append(line+"<|end|>")
+                if len(line) < self.max_len:
+                    self.text.append(line)
+                else:
+                    for i in range(len(line) // self.max_len + 1):
+                        if i != len(line) // self.max_len:
+                            self.text.append(line[i*self.max_len: (i+1)*self.max_len])
+                        else:
+                            self.text.append(line[i*self.max_len:])
 
             n = len(self.text)
             if split == "train":
@@ -152,4 +159,6 @@ class EnwikiDataset(Dataset):
         return self.tokens[idx], torch.cat((self.tokens[idx][1:], torch.tensor([self.tokenizer.pad_id])))
 
 if __name__ == "__main__":
-    dataset = TextDataset('datasets/wiki.train.tokens', '20B_tokenizer.json', 512)
+    train_set = EnwikiDataset(split="train", regenerate=True)
+    valid_set = EnwikiDataset(split="valid", regenerate=True)
+    test_set = EnwikiDataset(split="test", regenerate=True)

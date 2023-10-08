@@ -10,14 +10,12 @@ def load_params(args, file_name):
         setattr(args, key, params[key])
     setattr(args, "head_dim", args.embed // args.n_heads)
     setattr(args, "ffn_hidden_layer", 4 * args.embed)
-    '''
     if torch.cuda.is_available():
         setattr(args, "device", "cuda")
     elif torch.backends.mps.is_available():
         setattr(args, "device", "mps")
     else:
         setattr(args, "device", "cpu")
-    '''
 
 load_params(args, "params.json")
 
