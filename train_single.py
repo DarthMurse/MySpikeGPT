@@ -4,10 +4,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import argparse
+from spikingjelly.activation_based import functional
 from src.model import MySpikeGPT 
 from src.utils import *
 
-PAD_ID = 77
 class TrainConfig:
     def __init__(self,
                  model,
@@ -30,43 +30,34 @@ def train_one_epoch(train_config, epoch_num):
     args = train_config.args
     loss_fn = nn.CrossEntropyLoss()
     min_loss = 999999
+    i = 0
     device = train_config.args.device
-    scaler = torch.cuda.amp.GradScaler()
 
     model.train()
-
-    for i, (x, y) in enumerate(dataloader):
-        batch_size = x.shape[0]
+    
+    for i, (x, y) in tqdm(enumerate(dataloader), total=len(dataloader), desc=f"Epoch {epoch_num}, batch {i*args.batch_size}/{len(dataloader)}"):
         x = x.to(device)
-        y = y.to(device)
+        y = y.to(device)    # [B, S]
+        pred = model(x)     # [B, S, vocab]
+        loss = loss_fn(pred.flatten(0, 1), y.flatten(0, 1))
+            
+        model.zero_grad()
+        loss.backward()
+        optimizer.step()
+        lr_scheduler.step()
+        model.reset()
+        print(f"  loss: {loss.item()}")
 
-        for k in range(batch_size):
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                pred = []
-                for j in tqdm(range(args.ctx_len), desc=f"Epoch {epoch_num}, batch {i*args.batch_size}/{len(dataloader)}"):
-                    if x[k, j] != PAD_ID:
-                        pred.append(model.forward(x[k], j+1).unsqueeze(0))
-                        model.reset()
-                pred = torch.concat(pred, dim=0)
-                n = pred.shape[0]
-                loss = loss_fn(pred, y[k, :n])
-            model.zero_grad()
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-            lr_scheduler.step()
-            print(f"Epoch {epoch_num}, batch {i*args.batch_size}/{len(dataloader)}, loss: {loss}")
-
-        if  i % 10 == 0 and loss < min_loss:
+        if  i % 10 == 0 and loss.item() < min_loss:
             torch.save({'model': model.state_dict(), 'optim': optimizer.state_dict(), 'scheduler': lr_scheduler.state_dict()}, 'model/model.pth')
-            min_loss = loss
+            min_loss = loss.item()
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=bool, default=False)
     command_args = parser.parse_args()
 
-    train_set = EnwikiDataset("enwik8", "char_book.json", split="train", regenerate=False)
+    train_set = EnwikiDataset("enwik8", "char_book.json", split="train")
     model = MySpikeGPT().to(args.device)
     tokenizer = MyTokenizer("char_book.json", args.ctx_len)
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True)
@@ -81,6 +72,7 @@ def main():
         lr_scheduler.load_state_dict(checkpoint['scheduler'])
     config = TrainConfig(model, train_loader, optimizer, lr_scheduler)
 
+    print(f"Trainig starts! Device: {args.device}")
     for i in range(args.epoch):
         train_one_epoch(config, i+1)
     print("Training complete!")

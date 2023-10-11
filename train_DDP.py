@@ -49,7 +49,7 @@ def train_one_epoch(train_config, epoch_num, mloss=999999):
                 for j in tqdm(range(args.ctx_len), desc=f"Epoch {epoch_num}, batch {i*args.batch_size}/{len(dataloader)}"):
                     if x[k, j] != PAD_ID:
                         pred.append(model.forward(x[k], j+1).unsqueeze(0))
-                        model.module.reset()
+                        functional.reset_net(model.module)
             if len(pred) != 0:
                 pred = torch.concat(pred, dim=0)
                 n = pred.shape[0]
