@@ -19,4 +19,3 @@ def load_params(args, file_name):
         setattr(args, "device", "cpu")
 
 load_params(args, "params.json")
-args.device = 'cpu'

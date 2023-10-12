@@ -2,9 +2,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F 
 import math
-from spikingjelly.activation_based import neuron, functional, surrogate, layer
 
 from .args import *
+
+# This model replaces all the spiking neurons with ReLU
 
 class MySpikeGPT(nn.Module):
     def __init__(self, model_args=args):
@@ -12,7 +13,7 @@ class MySpikeGPT(nn.Module):
         self.args = model_args 
 
         self.encode_layer = EncodingLayer(self.args)
-        self.spiking_transformer = [SpikeTransformerBlock(self.args) for i in range(self.args.n_layers)]
+        self.transformer = [TransformerBlock(self.args) for i in range(self.args.n_layers)]
         self.out = OutputLayer(self.args)
 
     def forward(self, x):
@@ -20,15 +21,9 @@ class MySpikeGPT(nn.Module):
         assert x.shape[1] == self.args.ctx_len, "input sequence length is not equal to ctx_len!"
         out = self.encode_layer(x)
         for i in range(self.args.n_layers):
-            out = self.spiking_transformer[i](out)
+            out = self.transformer[i](out)
         out = self.out(out)
         return out
-
-    def reset(self):
-        self.encode_layer.reset()
-        for i in range(self.args.n_layers):
-            self.spiking_transformer[i].reset()
-        self.out.reset()
 
 class EncodingLayer(nn.Module):
     def __init__(self, model_args=args):
@@ -49,18 +44,14 @@ class EncodingLayer(nn.Module):
         self.poe = self.poe.to(self.args.device)
 
     def forward(self, x):
-        # x: [B, S], out: [T, B, S, D]
+        # x: [B, S], out: [B, S, D]
         S = x.shape[1]
         out = self.emb(x)
         out = out + self.poe[:S]
-        out = out.unsqueeze(0).repeat(self.args.T, 1, 1, 1)
         out = self.ln(out)
         return out
 
-    def reset(self):
-        pass
-
-class SpikeTransformerBlock(nn.Module):
+class TransformerBlock(nn.Module):
     def __init__(self, model_args=args):
         super().__init__()
         self.args = model_args
@@ -68,14 +59,10 @@ class SpikeTransformerBlock(nn.Module):
         self.sdsa = SDSA(self.args)
 
     def forward(self, x):
-        # x: [T, B, S, D], out: [T, B, S, D]
+        # x: [B, S, D], out: [B, S, D]
         h = x + self.sdsa(x)
         out = h + self.ffn(h)
         return out 
-
-    def reset(self):
-        self.ffn.reset()
-        self.sdsa.reset()
 
 class SDSA(nn.Module):
     def __init__(self, model_args=args):
@@ -90,11 +77,11 @@ class SDSA(nn.Module):
         self.wq = nn.Parameter(torch.zeros([self.dim, self.dim])).to(self.args.device)
         self.wo = nn.Parameter(torch.zeros([self.dim, self.dim])).to(self.args.device)
 
-        self.spike_q = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.spike_k = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.spike_v = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.init_spike = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.talking_heads = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.spike_q = nn.ReLU()
+        self.spike_k = nn.ReLU()
+        self.spike_v = nn.ReLU()
+        self.init_spike = nn.ReLU()
+        self.talking_heads = nn.ReLU()
 
         self.lnq = nn.LayerNorm(self.args.embed).to(self.args.device)
         self.lnk = nn.LayerNorm(self.args.embed).to(self.args.device)
@@ -109,7 +96,7 @@ class SDSA(nn.Module):
         Q = tmp @ self.wq 
         V = tmp @ self.wv 
         K = tmp @ self.wk
-        Q = self.spike_q(self.lnq(Q)) # [T, B, S, D]
+        Q = self.spike_q(self.lnq(Q)) # [B, S, D]
         V = self.spike_v(self.lnv(V))
         K = self.spike_k(self.lnk(K))
 
@@ -129,21 +116,14 @@ class SDSA(nn.Module):
         QKV = self.lno(QKV @ self.wo)
         return QKV
 
-    def reset(self):
-        self.spike_q.reset()
-        self.spike_v.reset()
-        self.spike_k.reset()
-        self.init_spike.reset()
-        self.talking_heads.reset()
-
 class FFN(nn.Module):
     def __init__(self, model_args=args):
         super().__init__()
         self.args = model_args
         self.hidden = model_args.ffn_hidden_layer
         self.dim = model_args.embed 
-        self.spike1 = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.init_spike = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.spike1 = nn.ReLU()
+        self.init_spike = nn.ReLU()
         self.linear1 = nn.Linear(self.dim, self.hidden, bias=False).to(self.args.device)
         self.linear2 = nn.Linear(self.hidden, self.dim, bias=False).to(self.args.device)
         self.ln1 = nn.LayerNorm(self.hidden).to(self.args.device)
@@ -158,22 +138,15 @@ class FFN(nn.Module):
         out = self.ln2(out)
         return out 
 
-    def reset(self):
-        self.spike1.reset()
-        self.init_spike.reset()
-
 class OutputLayer(nn.Module):
     def __init__(self, model_args=args):
         super().__init__()
         self.args = model_args 
         self.output = nn.Linear(self.args.embed, self.args.vocab_size, bias=False).to(self.args.device)
-        self.init_spike = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        
+        self.init_spike = nn.ReLU()
+
     def forward(self, x):
         out = self.init_spike(x) # [T, B, S, D]
         out = out.mean(0)
         out = self.output(out)
         return out
-
-    def reset(self):
-        self.init_spike.reset()

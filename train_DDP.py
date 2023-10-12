@@ -1,18 +1,31 @@
+import os
 import torch 
 from torch import nn
 import torch.nn.functional as F 
 from torch.utils.data import DataLoader
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel as DDP
-import argparse
-import os
-import subprocess
 from tqdm import tqdm
+import argparse
+from spikingjelly.activation_based import functional
+import functools
+
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.fully_sharded_data_parallel import (
+    CPUOffload,
+    BackwardPrefetch,
+)
+from torch.distributed.fsdp.wrap import (
+    size_based_auto_wrap_policy,
+    enable_wrap,
+    wrap,
+)
 
 from src.model import MySpikeGPT 
 from src.utils import *
 
-PAD_ID = 77
 class TrainConfig:
     def __init__(self,
                  model,
@@ -27,96 +40,92 @@ class TrainConfig:
         self.lr_scheduler = lr_scheduler
         self.args = model_args 
 
-def train_one_epoch(train_config, epoch_num, mloss=999999):
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12356'
+
+    # initialize the process group
+    dist.init_process_group("nccl", rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
+
+def train_one_epoch(train_config, rank, world_size):
     model = train_config.model
     dataloader = train_config.dataloader
     optimizer = train_config.optimizer
     lr_scheduler = train_config.lr_scheduler
     args = train_config.args
     loss_fn = nn.CrossEntropyLoss()
-    min_loss = mloss
+    min_loss = 999999
+    i = 0
     device = train_config.args.device
-    scaler = torch.cuda.amp.GradScaler()
 
+    model.train()
+    
     for i, (x, y) in enumerate(dataloader):
-        batch_size = x.shape[0]
+        ddp_loss = torch.zeros(2).to(rank)
         x = x.to(device)
-        y = y.to(device)
+        y = y.to(device)    # [B, S]
+        pred = model(x)     # [B, S, vocab]
+        loss = loss_fn(pred.flatten(0, 1), y.flatten(0, 1))
 
-        for k in range(batch_size):
-            with torch.autocast(device_type='cuda', dtype=torch.float16):
-                pred = []
-                for j in tqdm(range(args.ctx_len), desc=f"Epoch {epoch_num}, batch {i*args.batch_size}/{len(dataloader)}"):
-                    if x[k, j] != PAD_ID:
-                        pred.append(model.forward(x[k], j+1).unsqueeze(0))
-                        functional.reset_net(model.module)
-            if len(pred) != 0:
-                pred = torch.concat(pred, dim=0)
-                n = pred.shape[0]
-                loss = loss_fn(pred, y[k, :n])
-                model.zero_grad()
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-                lr_scheduler.step()
-                print(f"Epoch {epoch_num}, batch {i*args.batch_size}/{len(dataloader)}, loss: {loss}")
+        ddp_loss[0] += loss.item()
+        ddp_loss[1] += 1
+            
+        model.zero_grad()
+        loss.backward()
+        optimizer.step()
+        lr_scheduler.step()
+        model.reset()
 
-        if  i % 10 == 0 and loss < min_loss:
-            torch.save({'model': model.module.state_dict(), 'optim': optimizer.state_dict(), 'scheduler': lr_scheduler.state_dict(), 'loss': min_loss.item()}, 'model/model.pth')
-            min_loss = loss
-            print(f"Checkpoint saved with loss: {min_loss.item()}")
+        dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+        if rank == 0:
+            print(f"batch {i*world_size*args.batch_size}/{len(dataloader)} loss: {ddp_loss[0] / ddp_loss[1]}")
 
-def main():
+        '''
+        if  i % 100 == 0 and ddp_loss[0] / ddp_loss[1] < min_loss and rank == 0:
+            dist.barrier()
+            torch.save({'model': model.state_dict(), 'optim': optimizer.state_dict(), 'scheduler': lr_scheduler.state_dict()}, 'model/model.pth')
+            min_loss = ddp_loss[0] / ddp_loss[1]
+        '''
+
+def fsdp_main(rank, world_size):
     parser = argparse.ArgumentParser()
-    parser.add_argument("--resume", default=False, type=bool)
-    command_arg = parser.parse_args()
+    parser.add_argument("--resume", type=bool, default=False)
+    command_args = parser.parse_args()
 
-    proc_id = int(os.environ['SLURM_PROCID'])
-    ntasks = int(os.environ['SLURM_NTASKS'])
-    node_list = os.environ['SLURM_NODELIST']
-    num_gpus = torch.cuda.device_count()
-    addr = subprocess.getoutput(f"scontrol show hostname {node_list} | head -n1")
-    if "MASTER_PORT" in os.environ:
-        pass 
-    else:
-        os.environ["MASTER_PORT"] = "29500"
-    if "MASTER_ADDR" not in os.environ:
-        os.environ["MASTER_ADDR"] = addr
-    os.environ["WORLD_SIZE"] = str(ntasks)
-    os.environ["LOCAL_RANK"] = str(proc_id % num_gpus)
-    os.environ["RANK"] = str(proc_id)
+    setup(rank, world_size)
+    train_set = EnwikiDataset("enwik8", "char_book.json", split="train")
+    train_sampler = DistributedSampler(train_set, rank=rank, num_replicas=world_size, shuffle=True)
+    train_loader = DataLoader(train_set, batch_size=args.batch_size, sampler=train_sampler, num_workers=world_size, pin_memory=True)
+    my_auto_wrap_policy = functools.partial(
+        size_based_auto_wrap_policy, min_num_params=100
+    )
+    torch.cuda.set_device(rank)
 
-    rank = int(os.environ["RANK"])
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
-
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend='nccl')
-    device = torch.device("cuda", local_rank)
-
-    train_set = EnwikiDataset("enwik8", "char_book.json", split="train", regenerate=False)
-    train_sampler = torch.utils.data.distributed.DistributedSampler(train_set)
-    model = MySpikeGPT().to(device)
-    model = DDP(model, device_ids=[local_rank], output_device=local_rank)
-    tokenizer = MyTokenizer("char_book.json", args.ctx_len)
-    train_loader = DataLoader(train_set, 4*args.batch_size, sampler=train_sampler)
+    model = MySpikeGPT().to(rank)
+    model = FSDP(model)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.0001)
-    total_itr = args.epoch * (len(train_loader) // args.batch_size + 1)
+    total_itr = args.epoch * (len(train_loader) // (world_size * args.batch_size) + 1)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_itr)
     
-    min_loss = 9999999
-    if command_arg.resume:
-        checkpoint = torch.load("model/model.pth")
-        model.module.load_state_dict(checkpoint['model'])
+    if command_args.resume:
+        checkpoint = torch.load('model/model.pth')
+        model.load_state_dict(checkpoint['model'])
         optimizer.load_state_dict(checkpoint['optim'])
         lr_scheduler.load_state_dict(checkpoint['scheduler'])
-        min_loss = checkpoint['loss']
     config = TrainConfig(model, train_loader, optimizer, lr_scheduler)
 
+    print(f"Trainig starts! Device: {args.device}")
     for i in range(args.epoch):
-        config.dataloader.sampler.set_epoch(i)
-        train_one_epoch(config, i+1, min_loss)
+        train_one_epoch(config, rank, world_size)
     print("Training complete!")
+    cleanup()
 
 if __name__ == "__main__":
-    main()
+    #torch.autograd.set_detect_anomaly(True)
+    WORLD_SIZE = torch.cuda.device_count()
+    mp.spawn(fsdp_main,
+             args=([WORLD_SIZE]),
+             nprocs=WORLD_SIZE)
