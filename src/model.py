@@ -12,8 +12,13 @@ class MySpikeGPT(nn.Module):
         self.args = model_args 
 
         self.encode_layer = EncodingLayer(self.args)
-        self.spiking_transformer = [SpikeTransformerBlock(self.args) for i in range(self.args.n_layers)]
+        self.spiking_transformer = [SpikeTransformerBlock(i, self.args) for i in range(self.args.n_layers)]
         self.out = OutputLayer(self.args)
+
+        self.register_module('encode_layer', self.encode_layer)
+        for i in range(self.args.n_layers):
+            self.register_module('block'+str(i), self.spiking_transformer[i])
+        self.register_module('output_layer', self.out)
 
     def forward(self, x):
         # x: [B, S], out: [B, S, vocab]
@@ -35,24 +40,15 @@ class EncodingLayer(nn.Module):
         super().__init__()
         self.args = model_args
         self.emb = nn.Embedding(self.args.vocab_size, self.args.embed)
-        self.ln = nn.LayerNorm(self.args.embed).to(self.args.device)
-
-        # Apply sin/cos positional embedding (just because it is easy)
-        self.poe = torch.zeros(self.args.ctx_len, self.args.embed, requires_grad=False)
-        lamb = 10000
-        for i in range(self.args.ctx_len):
-            for j in range(self.args.embed):
-                if j % 2 == 0:
-                    self.poe[i, j] = math.sin(i / lamb ** (j/self.args.embed))
-                else:
-                    self.poe[i, j] = math.cos(i / lamb ** ((j-1)/self.args.embed))
-        self.poe = self.poe.to(self.args.device)
+        self.ln = nn.LayerNorm(self.args.embed)
+        
+        self.poe = nn.Parameter(torch.zeros(self.args.ctx_len, self.args.embed))
 
     def forward(self, x):
         # x: [B, S], out: [T, B, S, D]
         S = x.shape[1]
         out = self.emb(x)
-        out = out + self.poe[:S]
+        out = out + self.poe
         out = out.unsqueeze(0).repeat(self.args.T, 1, 1, 1)
         out = self.ln(out)
         return out
@@ -61,11 +57,14 @@ class EncodingLayer(nn.Module):
         pass
 
 class SpikeTransformerBlock(nn.Module):
-    def __init__(self, model_args=args):
+    def __init__(self, i, model_args=args):
         super().__init__()
         self.args = model_args
         self.ffn = FFN(self.args)
-        self.sdsa = SDSA(self.args)
+        self.sdsa = SDSA(i, self.args)
+
+        self.register_module('ffn', self.ffn)
+        self.register_module('sdsa', self.sdsa)
 
     def forward(self, x):
         # x: [T, B, S, D], out: [T, B, S, D]
@@ -78,28 +77,28 @@ class SpikeTransformerBlock(nn.Module):
         self.sdsa.reset()
 
 class SDSA(nn.Module):
-    def __init__(self, model_args=args):
+    def __init__(self, i, model_args=args):
         super().__init__()
         self.args = model_args
         self.n_heads = self.args.n_heads
         self.head_dim = self.args.head_dim
         self.dim = self.args.embed
 
-        self.wk = nn.Parameter(torch.zeros([self.dim, self.dim])).to(self.args.device)
-        self.wv = nn.Parameter(torch.zeros([self.dim, self.dim])).to(self.args.device)
-        self.wq = nn.Parameter(torch.zeros([self.dim, self.dim])).to(self.args.device)
-        self.wo = nn.Parameter(torch.zeros([self.dim, self.dim])).to(self.args.device)
+        self.wk = nn.Parameter(torch.zeros([self.dim, self.dim]))
+        self.wv = nn.Parameter(torch.zeros([self.dim, self.dim]))
+        self.wq = nn.Parameter(torch.zeros([self.dim, self.dim]))
+        self.wo = nn.Parameter(torch.zeros([self.dim, self.dim]))
 
-        self.spike_q = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.spike_k = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.spike_v = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.init_spike = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.talking_heads = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.spike_q = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.spike_k = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.spike_v = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.init_spike = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.talking_heads = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
 
-        self.lnq = nn.LayerNorm(self.args.embed).to(self.args.device)
-        self.lnk = nn.LayerNorm(self.args.embed).to(self.args.device)
-        self.lnv = nn.LayerNorm(self.args.embed).to(self.args.device)
-        self.lno = nn.LayerNorm(self.args.embed).to(self.args.device)
+        self.lnq = nn.LayerNorm(self.args.embed)
+        self.lnk = nn.LayerNorm(self.args.embed)
+        self.lnv = nn.LayerNorm(self.args.embed)
+        self.lno = nn.LayerNorm(self.args.embed)
 
     def forward(self, x):
         T, B, S, D = x.shape
@@ -142,12 +141,12 @@ class FFN(nn.Module):
         self.args = model_args
         self.hidden = model_args.ffn_hidden_layer
         self.dim = model_args.embed 
-        self.spike1 = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.init_spike = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
-        self.linear1 = nn.Linear(self.dim, self.hidden, bias=False).to(self.args.device)
-        self.linear2 = nn.Linear(self.hidden, self.dim, bias=False).to(self.args.device)
-        self.ln1 = nn.LayerNorm(self.hidden).to(self.args.device)
-        self.ln2 = nn.LayerNorm(self.args.embed).to(self.args.device)
+        self.spike1 = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.init_spike = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.linear1 = nn.Linear(self.dim, self.hidden, bias=False)
+        self.linear2 = nn.Linear(self.hidden, self.dim, bias=False)
+        self.ln1 = nn.LayerNorm(self.hidden)
+        self.ln2 = nn.LayerNorm(self.args.embed)
         
     def forward(self, x):
         out = self.init_spike(x)
@@ -166,8 +165,8 @@ class OutputLayer(nn.Module):
     def __init__(self, model_args=args):
         super().__init__()
         self.args = model_args 
-        self.output = nn.Linear(self.args.embed, self.args.vocab_size, bias=False).to(self.args.device)
-        self.init_spike = neuron.LIFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
+        self.output = nn.Linear(self.args.embed, self.args.vocab_size, bias=False)
+        self.init_spike = neuron.IFNode(step_mode='m', surrogate_function=surrogate.ATan(2.0))
         
     def forward(self, x):
         out = self.init_spike(x) # [T, B, S, D]

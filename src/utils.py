@@ -2,6 +2,7 @@ from torch.utils.data import Dataset
 import torch
 import os 
 from typing import List, Tuple
+from transformers import PreTrainedTokenizerFast
 
 from .args import *
 
@@ -32,11 +33,11 @@ class MyTokenizer:
         output = torch.tensor(output)
         return output.to(torch.long)
 
-    # Decode List[int] to str
+    # Decode torch.tensor to str
     def decode(self, tokens: torch.Tensor):
         result = ""
         for i in range(len(tokens)):
-            result = result + self.decode_dict[tokens[i]]
+            result = result + self.decode_dict[tokens[i].item()]
         return result
 
 class EnwikiDataset(Dataset):
@@ -86,10 +87,43 @@ class EnwikiDataset(Dataset):
         y = self.tokenizer.encode(y_text)
         return x, y
 
+class WikitextDataset(Dataset):
+    def __init__(self, tokenizer, name="wiki", ctx_len=args.ctx_len, split="train"):
+        self.max_len = ctx_len
+        self.tokenizer = tokenizer
+
+        if os.path.exists('datasets/'+name+'.preprocessed.'+split):
+            print("Using preprocessed dataset ..."+name+"."+split)
+            self.tokens = torch.load('datasets/'+name+'.preprocessed.'+split)
+        else:
+            print("Loading original dataset ... "+name+"."+split)
+            with open('datasets/'+name+'.'+split, 'r') as f:
+                text = f.read()
+            for i in range(len(text)):
+                if text[i] == ' ' and i+1 < len(text) and text[i+1] == '\n' and i >= 1 and text[i-1] == '\n':
+                    text = text[:i] + '<|endoftext|>' + text[i+1:]
+            self.tokens = self.tokenizer.encode(text)
+            torch.save(self.tokens, 'datasets/'+name+'.preprocessed.'+split)
+
+    def __len__(self):
+        return (len(self.tokens) - self.max_len - 1)
+    
+    def __getitem__(self, idx):
+        x = self.tokens[idx: idx+self.max_len]
+        y = self.tokens[idx+1: idx+self.max_len+1]
+        x, y = torch.tensor(x), torch.tensor(y)
+        return x, y
+
 if __name__ == "__main__":
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file="20B_tokenizer.json")
+    train_set = WikitextDataset(tokenizer, split='train')
+    valid_set = WikitextDataset(tokenizer, split='valid')
+    test_set = WikitextDataset(tokenizer, split='test')
+    '''
     train_set = EnwikiDataset(split="train")
     valid_set = EnwikiDataset(split="valid")
     test_set = EnwikiDataset(split="test")
+    '''
     print(f"test_set[0]: x and y, length: {test_set[0][0].shape[0]}, ctx_len: {args.ctx_len}")
     print(test_set[0][0])
     print(test_set[0][1])
