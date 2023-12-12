@@ -7,6 +7,7 @@ from tqdm import tqdm
 import argparse
 from spikingjelly.activation_based import functional
 import functools
+from datasets import load_dataset
 from accelerate import Accelerator
 
 #from src.SpikeGPT import GPT, GPTConfig
@@ -38,6 +39,7 @@ def train_one_epoch(train_config, resume=False):
     lr_scheduler = train_config.lr_scheduler
     model_name = train_config.model_name
     args = train_config.args
+
     loss_fn = nn.CrossEntropyLoss()
     accelerator = Accelerator()
     model, optimizer, train_loader, valid_loader, lr_scheduler = accelerator.prepare(model, optimizer, train_loader, valid_loader, lr_scheduler)
@@ -49,8 +51,7 @@ def train_one_epoch(train_config, resume=False):
     
     for i, (x, y) in enumerate(train_loader):  
         model.train()
-        pred = model(x)     # [B, S, vocab]
-        loss = loss_fn(pred.flatten(0, 1), y.flatten(0, 1))
+        loss = model(x, y)     # [B, S, vocab]
             
         optimizer.zero_grad()
         accelerator.backward(loss)
@@ -64,7 +65,7 @@ def train_one_epoch(train_config, resume=False):
             for j, (vx, vy) in enumerate(valid_loader):
                 if j < count:
                     vpred = model(vx)
-                    valid_loss += loss_fn(vpred.flatten(0, 1), vy.flatten(0, 1))
+                    valid_loss += loss_fn(vpred, vy[:, -1])
                 else:
                     break
             valid_loss /= count
@@ -73,15 +74,15 @@ def train_one_epoch(train_config, resume=False):
         loss_curve.append(loss.item())
         valid_loss_curve.append(valid_loss.item())
         
-        if  i % 300 == 0 and i != 0:
+        if  i % 100 == 0 and i != 0:
             accelerator.save_state(model_name+'_multiple'+str(i))
-            torch.save(loss_curve, 'model1/loss_curve')
-            torch.save(valid_loss_curve, 'model1/valid_loss_curve')
+            torch.save(loss_curve, 'model/loss_curve')
+            torch.save(valid_loss_curve, 'model/valid_loss_curve')
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--resume", type=bool, default=False)
-    parser.add_argument("--model_type", type=str, default="SNN")
+    parser.add_argument("--model_type", type=str, default="ANN")
     command_args = parser.parse_args()
     
     if command_args.model_type == "SNN":
@@ -89,15 +90,17 @@ def main():
         model_name = 'model/SNN_model'
     elif command_args.model_type == "ANN":
         from src.ANNModel import MySpikeGPT
-        model_name = 'model1/ANN_model'
+        model_name = 'model/ANN_model'
 
     tokenizer = PreTrainedTokenizerFast(tokenizer_file="20B_tokenizer.json")
     train_set = WikitextDataset(tokenizer, split="train")
     valid_set = WikitextDataset(tokenizer, split='valid')
+    #train_set = EnwikiDataset(split="train")
+    #valid_set = EnwikiDataset(split="valid")
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=1, shuffle=True)
     model = MySpikeGPT()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.001)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.00)
     total_itr = args.epoch * (len(train_loader) // args.batch_size + 1)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_itr)
         

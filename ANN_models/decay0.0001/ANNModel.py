@@ -150,7 +150,7 @@ class MySpikeGPT(nn.Module):
             self.register_module('transformer_block'+str(i), self.transformer[i])
         self.register_module('out', self.out)
 
-    def forward(self, x, y=None):
+    def forward(self, x):
         # x: [B, S], out: [B, S, vocab]
         assert x.shape[1] == self.args.ctx_len, "input sequence length is not equal to ctx_len!"
         out = self.encode_layer(x)
@@ -158,12 +158,7 @@ class MySpikeGPT(nn.Module):
         for i in range(self.args.n_layers):
             out = self.transformer[i](out)
         out = self.out(out)
-
-        if y is not None:
-            out = F.cross_entropy(out.view(-1, self.args.vocab_size), y.view(-1))
-            return out
-        else:
-            return out[:, -1, :]
+        return out
 
 class TransformerBlock(nn.Module):
     def __init__(self, i, model_args=args):

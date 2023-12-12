@@ -143,27 +143,22 @@ class MySpikeGPT(nn.Module):
         self.transformer = [TransformerBlock(i, self.args) for i in range(self.args.n_layers)]
         self.out = OutputLayer(self.args)
 
-        #self.pos = nn.Parameter(torch.zeros([self.args.ctx_len, self.args.embed]))
-        #self.register_parameter('pos', self.pos)
+        self.pos = nn.Parameter(torch.zeros([self.args.ctx_len, self.args.embed]))
+        self.register_parameter('pos', self.pos)
 
         for i in range(self.args.n_layers):
             self.register_module('transformer_block'+str(i), self.transformer[i])
         self.register_module('out', self.out)
 
-    def forward(self, x, y=None):
+    def forward(self, x):
         # x: [B, S], out: [B, S, vocab]
         assert x.shape[1] == self.args.ctx_len, "input sequence length is not equal to ctx_len!"
         out = self.encode_layer(x)
-        #out = out + self.pos
+        out = out + self.pos
         for i in range(self.args.n_layers):
             out = self.transformer[i](out)
         out = self.out(out)
-
-        if y is not None:
-            out = F.cross_entropy(out.view(-1, self.args.vocab_size), y.view(-1))
-            return out
-        else:
-            return out[:, -1, :]
+        return out
 
 class TransformerBlock(nn.Module):
     def __init__(self, i, model_args=args):
@@ -171,21 +166,21 @@ class TransformerBlock(nn.Module):
         self.args = model_args
         self.ffn = FFN(self.args)
         self.sdsa = SDSA(i, self.args)
-        self.sdsa_norm = RMSNorm(self.args.embed)
-        self.ffn_norm = RMSNorm(self.args.embed)
+        self.sdsa_norm = nn.BatchNorm1d(self.args.ctx_len)
+        self.ffn_norm = nn.BatchNorm1d(self.args.ctx_len)
 
-        #self.if1 = nn.ReLU()
-        #self.if2 = nn.ReLU()
+        self.if1 = nn.ReLU()
+        self.if2 = nn.ReLU()
 
         self.register_module('ffn', self.ffn)
         self.register_module('sdsa', self.sdsa)
-        self.register_module('sdsa_norm', self.sdsa_norm)
-        self.register_module('ffn_norm', self.ffn_norm)
+        #self.register_module('sdsa_norm', self.sdsa_norm)
+        #self.register_module('ffn_norm', self.ffn_norm)
 
     def forward(self, x):
         # x: [B, S, D], out: [B, S, D]
-        h = x + self.sdsa(self.sdsa_norm(x))
-        out = h + self.ffn(self.ffn_norm(h))
+        h = x + self.sdsa(self.if1(self.sdsa_norm(x)))
+        out = h + self.ffn(self.if2(self.ffn_norm(h)))
         return out 
 
 class SDSA(nn.Module):
@@ -201,26 +196,26 @@ class SDSA(nn.Module):
         self.wq = nn.Linear(self.dim, self.dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
-        #self.q_if = nn.ReLU()
-        #self.k_if = nn.ReLU()
-        #self.v_if = nn.ReLU()
-        #self.o_if = nn.ReLU()
+        self.q_if = nn.ReLU()
+        self.k_if = nn.ReLU()
+        self.v_if = nn.ReLU()
+        self.o_if = nn.ReLU()
 
-        self.freq_cis = precompute_freqs_cis(self.head_dim, self.args.ctx_len)
+        #self.freq_cis = precompute_freqs_cis(self.head_dim, self.args.ctx_len)
 
     def forward(self, x):
         B, S, D = x.shape
 
-        Q = self.wq(x)
-        V = self.wv(x)
-        K = self.wk(x)
+        Q = self.q_if(self.wq(x))
+        V = self.v_if(self.wv(x))
+        K = self.k_if(self.wk(x))
         #K = F.relu(K) # added
 
         Q = Q.reshape(B, -1, self.n_heads, self.head_dim)
         V = V.reshape(B, -1, self.n_heads, self.head_dim)
         K = K.reshape(B, -1, self.n_heads, self.head_dim)
-        freq_cis = self.freq_cis.to(Q.device)
-        Q, K = apply_rotary_emb(Q, K, freq_cis)
+        #freq_cis = self.freq_cis.to(Q.device)
+        #Q, K = apply_rotary_emb(Q, K, freq_cis)
 
         Q = Q.transpose(2, 1)
         V = V.transpose(2, 1)
@@ -238,7 +233,7 @@ class SDSA(nn.Module):
 
         QKV = QKV.transpose(2, 1)
         QKV = QKV.reshape(B, S, -1)
-        QKV = self.wo(QKV)
+        QKV = self.o_if(self.wo(QKV))
         return QKV
 
 class FFN(nn.Module):
@@ -266,12 +261,12 @@ class OutputLayer(nn.Module):
         super().__init__()
         self.args = model_args 
         self.output = nn.Linear(self.args.embed, self.args.vocab_size, bias=False)
-        self.norm = RMSNorm(self.args.embed)
-        #self.out_if = nn.ReLU()
-        self.register_module("norm", self.norm)
+        self.norm = nn.BatchNorm1d(self.args.ctx_len)
+        self.out_if = nn.ReLU()
+        #self.register_module("norm", self.norm)
 
     def forward(self, x):
         out = self.norm(x)
-        #out = self.out_if(out)
+        out = self.out_if(out)
         out = self.output(out)
         return out

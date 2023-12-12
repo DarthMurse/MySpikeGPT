@@ -80,8 +80,8 @@ def train_one_epoch(train_config, epoch_num):
 
         if  i % 5000 == 0 and i != 0:
             torch.save({'model': model.state_dict(), 'optim': optimizer.state_dict(), 'scheduler': lr_scheduler.state_dict()}, model_name+str(i))
-            torch.save(loss_curve, 'model1/loss_curve_ann_to_convert')
-            torch.save(valid_loss_curve, 'model1/valid_loss_curve_ann_to_convert')
+            torch.save(loss_curve, 'model/loss_curve_ann_to_convert')
+            torch.save(valid_loss_curve, 'model/valid_loss_curve_ann_to_convert')
 
         #if i % 100 == 0:
         #    for param in model.parameters():
@@ -99,7 +99,7 @@ def main():
         model_name = "model/model.pth"
     elif command_args.model_type == "ANN":
         from src.ANNModel import MySpikeGPT
-        model_name = "model1/ANN_model_single"
+        model_name = "model/ANN_model_single"
 
     model = MySpikeGPT().to(args.device)
     #model = model = GPT(GPTConfig(args.vocab_size, args.ctx_len, model_type='RWKV',
@@ -107,10 +107,14 @@ def main():
     #print(model.parameters)
     #for param in model.parameters():
     #    print(param.shape)
-
+    
     tokenizer = PreTrainedTokenizerFast(tokenizer_file='20B_tokenizer.json')
     train_set = WikitextDataset(tokenizer, split='train')
     valid_set = WikitextDataset(tokenizer, split='valid')
+    
+    #train_set = EnwikiDataset(split="train")
+    #valid_set = EnwikiDataset(split="valid")
+
     train_loader = DataLoader(train_set, args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_set, 1, shuffle=True)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.001)

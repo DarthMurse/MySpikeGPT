@@ -150,7 +150,7 @@ class MySpikeGPT(nn.Module):
             self.register_module('transformer_block'+str(i), self.transformer[i])
         self.register_module('out', self.out)
 
-    def forward(self, x, y=None):
+    def forward(self, x):
         # x: [B, S], out: [B, S, vocab]
         assert x.shape[1] == self.args.ctx_len, "input sequence length is not equal to ctx_len!"
         out = self.encode_layer(x)
@@ -158,12 +158,7 @@ class MySpikeGPT(nn.Module):
         for i in range(self.args.n_layers):
             out = self.transformer[i](out)
         out = self.out(out)
-
-        if y is not None:
-            out = F.cross_entropy(out.view(-1, self.args.vocab_size), y.view(-1))
-            return out
-        else:
-            return out[:, -1, :]
+        return out
 
 class TransformerBlock(nn.Module):
     def __init__(self, i, model_args=args):
@@ -248,17 +243,15 @@ class FFN(nn.Module):
         self.hidden = model_args.ffn_hidden_layer
         self.dim = model_args.embed 
         #self.spike1 = nn.SiLU()
-        self.spike1 = nn.ReLU()
+        #self.spike1 = nn.ReLU()``
         #self.init_spike = nn.SiLU()
-        self.init_spike = nn.ReLU()
+        #self.init_spike = nn.ReLU()
         self.linear1 = nn.Linear(self.dim, self.hidden, bias=False)
-        self.linear2 = nn.Linear(self.hidden, self.dim, bias=False)
+        self.linear2 = nn.Linear(self.dim, self.hidden, bias=False)
+        self.linear3 = nn.Linear(self.hidden, self.dim, bias=False)
         
     def forward(self, x):
-        out = self.init_spike(x)
-        out = self.linear1(out)
-        out = self.spike1(out)
-        out = self.linear2(out)
+        out = self.linear3(F.silu(self.linear1(x)) * self.linear2(x))
         return out 
 
 class OutputLayer(nn.Module):

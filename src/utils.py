@@ -3,6 +3,7 @@ import torch
 import os 
 from typing import List, Tuple
 from transformers import PreTrainedTokenizerFast
+from datasets import load_from_disk
 
 from .args import *
 
@@ -114,16 +115,28 @@ class WikitextDataset(Dataset):
         x, y = torch.tensor(x), torch.tensor(y)
         return x, y
 
+class LambadaDataset(Dataset):
+    def __init__(self, tokenizer, ctx_len=args.ctx_len, split="train"):
+        self.dataset = load_from_disk("datasets/lambada/"+split)
+
+    def __len__(self):
+        pass
+
+    def __getitem__(self, idx):
+        pass
+
 if __name__ == "__main__":
     tokenizer = PreTrainedTokenizerFast(tokenizer_file="20B_tokenizer.json")
-    train_set = WikitextDataset(tokenizer, split='train')
-    valid_set = WikitextDataset(tokenizer, split='valid')
-    test_set = WikitextDataset(tokenizer, split='test')
-    '''
+
+    #train_set = WikitextDataset(tokenizer, split='train')
+    #valid_set = WikitextDataset(tokenizer, split='valid')
+    #test_set = WikitextDataset(tokenizer, split='test')
     train_set = EnwikiDataset(split="train")
     valid_set = EnwikiDataset(split="valid")
     test_set = EnwikiDataset(split="test")
-    '''
-    print(f"test_set[0]: x and y, length: {test_set[0][0].shape[0]}, ctx_len: {args.ctx_len}")
-    print(test_set[0][0])
-    print(test_set[0][1])
+    
+    #print(f"test_set[0]: x and y, length: {test_set[0][0].shape[0]}, ctx_len: {args.ctx_len}")
+    #print(test_set[0][0])
+    #print(test_set[0][1])
+
+    #train_set = LambadaDataset("validation")

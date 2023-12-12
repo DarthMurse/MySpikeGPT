@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F 
 import math
+from typing import Optional, Tuple
 
 from .args import *
 
@@ -55,7 +56,7 @@ class OutputLayer(nn.Module):
     def forward(self, x):
         B, S, D = x.shape
         out = self.norm(x)
-        return self.output(out[:, -1, :])
+        return self.output(out)
 
 class MySpikeGPT(nn.Module):
     def __init__(self, model_args=args):
