@@ -100,7 +100,7 @@ def main():
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=1, shuffle=True)
     model = MySpikeGPT()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.00)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.01)
     total_itr = args.epoch * (len(train_loader) // args.batch_size + 1)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_itr)
         

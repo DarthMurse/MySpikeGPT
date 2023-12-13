@@ -5,7 +5,7 @@
 	"vocab_size": 50277,
 	"n_heads": 12,
 	"T": 1,
-	"batch_size": 16,
+	"batch_size": 18,
 	"lr": 1e-4,
 	"epoch": 1
 }

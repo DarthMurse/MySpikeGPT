@@ -49,8 +49,8 @@ def BPC(model, valid_set, tokenizer, model_args=args):
                 break 
         
             x, y = x.to(model_args.device), y.to(model_args.device)
-            pred = model(x)
-            total_loss += loss_fn(pred, y).item()
+            single_loss = model(x, y)
+            total_loss += single_loss.item()
 
         loss = total_loss / total_count
         print(f"Average loss: {loss}")
