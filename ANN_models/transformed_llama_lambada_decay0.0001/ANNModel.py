@@ -48,7 +48,6 @@ class RMSNorm(torch.nn.Module):
             torch.Tensor: The output tensor after applying RMSNorm.
 
         """
-        Q, K = apply_rotary_emb(Q, K, freq_cis)
         output = self._norm(x.float()).type_as(x)
         return output * self.weight
 
@@ -206,7 +205,7 @@ class SDSA(nn.Module):
         #self.v_if = nn.ReLU()
         #self.o_if = nn.ReLU()
 
-        #self.freq_cis = precompute_freqs_cis(self.head_dim, self.args.ctx_len)
+        self.freq_cis = precompute_freqs_cis(self.head_dim, self.args.ctx_len)
 
     def forward(self, x):
         B, S, D = x.shape

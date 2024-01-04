@@ -6,55 +6,43 @@ from typing import Optional, Tuple
 
 from .args import *
 
-class IF(nn.Module):
-    def __init__(self, T=4, step=1, is_first=False):
+def act_quantization(b):
+    def uniform_quant(x, b):
+        xdiv = x.mul(2 ** b - 1)
+        xhard = xdiv.round().div(2 ** b - 1)
+        return xhard
+    
+    class _uq(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, alpha):
+            x = x.div(alpha)
+            x_c = x.clamp(min=0, max=1)
+            x_q = uniform_quant(x_c, b)
+            ctx.save_for_backward(x, x_q)
+            x_q = x_q.mul(alpha)
+            return x_q
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            grad_input = grad_output.clone()
+            x, x_q = ctx.saved_tensors
+            i = (x > 1).float()
+            grad_alpha = (grad_output * (i + (x_q - x) * (1 - i))).sum()
+            grad_input = grad_input * (1 - i)
+            return grad_input, grad_alpha
+
+    return _uq().apply
+
+class QuantReLU(nn.ReLU):
+    def __init__(self):
         super().__init__()
-        self.alpha = torch.nn.Parameter(torch.tensor(8.0))
-        self.T = T
-        self.step = step
-        self.is_first = is_first
+        self.bit = 16
+        self.act_alq = act_quantization(self.bit)
+        self.act_alpha = torch.nn.Parameter(torch.tensor(8.0))
 
     def forward(self, x):
-        # x [T, B, S, D]
-        if self.is_first:
-            x.unsqueeze_(0)
-            x = x.repeat(self.T, 1, 1, 1)
-
-        threshold = self.alpha
-        membrane = 0.5 * threshold
-        spikes = torch.zeros(x.shape)
-
-        for i in range(self.step):
-            membrane = membrane + x[i]
-        for i in range(0, self.T):
-            if i + self.step < self.T:
-                membrane = membrane + x[i + self.step]
-            spike = membrane > threshold
-            membrane[spike] = membrane[spike] - threshold
-            spikes[i+j] = spike.float()
-
-        return threshold * spikes
-
-class SpikeInnerProduct(nn.Module):
-    def __init__(self, T=4, step=1):
-        super().__init__()
-        self.T = 4
-        self.step = 1
-
-    def forward(self, x, y):
-        T, B, n_heads, S, head_dim = x.shape
-        out_weight = torch.zeros([T, B, n_heads, S, S])
-        
-        for i in range(0, self.T, self.step):
-            x_add = 0
-            y_add = 0
-            for j in range(self.step):
-                x_add = x_add + x[i+j]
-                y_add = y_add + y[i+j]
-            weight = x_add @ y_add
-            for j in range(self.step):
-                out_weight[i+j] = weight
-        return out_weight
+        x = F.relu(x)
+        return self.act_alq(x, self.act_alpha)
 
 class MySpikeGPT(nn.Module):
     def __init__(self, model_args=args):
@@ -68,7 +56,7 @@ class MySpikeGPT(nn.Module):
         self.pos = nn.Parameter(torch.zeros([self.args.ctx_len, self.args.embed]))
         self.register_parameter('pos', self.pos)
 
-        self.init_spike = IF(step=4, is_first=True)
+        self.init_spike = QuantReLU()
 
         for i in range(self.args.n_layers):
             self.register_module('transformer_block'+str(i), self.transformer[i])
@@ -124,35 +112,34 @@ class SDSA(nn.Module):
         self.wq = nn.Linear(self.dim, self.dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
-        self.q_if = IF(step=4)
-        self.k_if = IF(step=4)
-        self.v_if = IF(step=4)
-        self.o_if = IF(step=4)
-        self.softmax_if = IF(step=4)
-        self.weight_if = IF(step=4)
-        self.inner_prodcut = SpikeInnerProduct(step=4)
+        self.q_if = QuantReLU()
+        self.k_if = QuantReLU()
+        self.v_if = QuantReLU()
+        self.o_if = QuantReLU()
+        self.softmax_if = QuantReLU()
+        self.weight_if = QuantReLU()
 
         #self.freq_cis = precompute_freqs_cis(self.head_dim, self.args.ctx_len)
 
     def forward(self, x):
-        T, B, S, D = x.shape
+        B, S, D = x.shape
 
         Q = self.wq(x)
         V = self.wv(x)
         K = self.wk(x)
 
-        Q = Q.reshape(T, B, -1, self.n_heads, self.head_dim)
-        V = V.reshape(T, B, -1, self.n_heads, self.head_dim)
-        K = K.reshape(T, B, -1, self.n_heads, self.head_dim)
+        Q = Q.reshape(B, -1, self.n_heads, self.head_dim)
+        V = V.reshape(B, -1, self.n_heads, self.head_dim)
+        K = K.reshape(B, -1, self.n_heads, self.head_dim)
 
-        Q = Q.transpose(2, 3)
-        V = V.transpose(2, 3)
-        K = K.transpose(2, 3)  # [T, B, n_heads, S, head_dim]
+        Q = Q.transpose(2, 1)
+        V = V.transpose(2, 1)
+        K = K.transpose(2, 1)  # [B, n_heads, S, head_dim]
         K = self.k_if(K)
         Q = self.q_if(Q)
         V = self.v_if(V)
 
-        QK = self.inner_product(Q, K) / math.sqrt(self.dim) # [T, B, n_heads, S, S]
+        QK = Q @ K.transpose(-1, -2) / math.sqrt(self.dim) # [B, n_heads, S, S]
         mask = torch.full(
                 (1, 1, S, S), float("-inf"), device=self.args.device
             )

@@ -36,33 +36,42 @@ def sample_top_p(probs, p):
 
 def BPC(model, valid_set, tokenizer, model_args=args):
     model.eval()
-    valid_loader = DataLoader(valid_set, batch_size=model_args.batch_size, shuffle=True)
+    valid_loader = DataLoader(valid_set, batch_size=1, shuffle=True)
     total_count = 100
     total_loss = 0
     loss_fn = nn.CrossEntropyLoss()
     temperature = 1.0
     top_p = 0.9
+    acc = 0
 
     with torch.no_grad():
+        #'''
         for i, (x, y) in tqdm(enumerate(valid_loader), total=total_count, desc=f"total_count: {total_count}, current_loss: {total_loss}"):
             if  i >= total_count:
                 break 
-        
+            
             x, y = x.to(model_args.device), y.to(model_args.device)
-            single_loss = model(x, y)
-            total_loss += single_loss.item()
+            pred = model(x, y)
+            pred = pred[0, y[0, 1]-1, :]
+            prob = torch.softmax(pred, dim=-1)
+            idxs = sample_top_p(prob, top_p)
+            acc += (idxs == y[0, 0]).item()
+            total_loss += loss_fn(pred, y[0, 0]).item()
 
         loss = total_loss / total_count
-        print(f"Average loss: {loss}")
+        acc = acc / (total_count * model_args.batch_size)
+        print(f"Average loss: {loss}, accuracy: {acc}")
 
+        '''
         print("Now print a sentence using temperature top-p sampling: ")
-        initial_input = valid_set[2000][0].to(model_args.device)
+        initial_input = valid_set[0][0].to(model_args.device)
         print("input: " + tokenizer.decode(initial_input))
         print('--------------------------------------------------------------')
         output = initial_input
         idx = 1
+        max_gen_len = 1000
         i = 0
-        while idx != 0:
+        while i <= max_gen_len:
             pred = model(initial_input.unsqueeze(0))
             pred = pred[0]
             #print(pred)
@@ -72,20 +81,22 @@ def BPC(model, valid_set, tokenizer, model_args=args):
             initial_input = output[i+1:]
             i += 1
         print("output: " + tokenizer.decode(output))
+        '''
 
     return loss 
 
 if __name__ == "__main__":
     model_args = args
 
-    from src.ANNModel import MySpikeGPT
+    from src.QuantModel import MySpikeGPT
     model_name = 'ANN_models/'+sys.argv[1]+'/model.pth'
 
     model = MySpikeGPT(model_args).to(model_args.device)
     checkpoint = torch.load(model_name, map_location='cpu')
     model.load_state_dict(checkpoint)
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file='20B_tokenizer.json')
-    valid_set = WikitextDataset(tokenizer, split="test")
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file='lambada.json')
+    valid_set = LambadaDataset(tokenizer, split="test")
+    #valid_set = WikitextDataset(tokenizer, split="train")
     #tokenizer = MyTokenizer("char_book.json", model_args.ctx_len)
     #valid_set = EnwikiDataset(split="test")
     loss = BPC(model, valid_set, tokenizer)

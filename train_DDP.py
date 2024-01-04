@@ -9,6 +9,7 @@ from spikingjelly.activation_based import functional
 import functools
 from datasets import load_dataset
 from accelerate import Accelerator
+from transformers import PreTrainedTokenizerFast
 
 #from src.SpikeGPT import GPT, GPTConfig
 from src.utils import *
@@ -47,7 +48,7 @@ def train_one_epoch(train_config, resume=False):
     valid_loss_curve = []
 
     if resume:
-        accelerator.load_state(model_name)
+        accelerator.load_state(model_name+"_multiple20000")
     
     for i, (x, y) in enumerate(train_loader):  
         model.train()
@@ -61,11 +62,12 @@ def train_one_epoch(train_config, resume=False):
         model.eval()
         with torch.no_grad():
             valid_loss = 0
-            count = 5
+            count = 20
             for j, (vx, vy) in enumerate(valid_loader):
                 if j < count:
-                    vpred = model(vx)
-                    valid_loss += loss_fn(vpred, vy[:, -1])
+                    vpred = model(vx, vy)
+                    valid_loss += loss_fn(vpred[0, vy[0, 1]-1, :], vy[0, 0])
+                    #valid_loss += loss_fn(vpred, vy[:, -1])
                 else:
                     break
             valid_loss /= count
@@ -74,7 +76,7 @@ def train_one_epoch(train_config, resume=False):
         loss_curve.append(loss.item())
         valid_loss_curve.append(valid_loss.item())
         
-        if  i % 100 == 0 and i != 0:
+        if  i % 1000 == 0 and i != 0:
             accelerator.save_state(model_name+'_multiple'+str(i))
             torch.save(loss_curve, 'model/loss_curve')
             torch.save(valid_loss_curve, 'model/valid_loss_curve')
@@ -89,18 +91,18 @@ def main():
         from src.model import MySpikeGPT
         model_name = 'model/SNN_model'
     elif command_args.model_type == "ANN":
-        from src.ANNModel import MySpikeGPT
+        from src.QuantModel import MySpikeGPT
         model_name = 'model/ANN_model'
 
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file="20B_tokenizer.json")
-    train_set = WikitextDataset(tokenizer, split="train")
-    valid_set = WikitextDataset(tokenizer, split='valid')
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file="lambada.json")
+    train_set = LambadaDataset(tokenizer, split="train")
+    valid_set = LambadaDataset(tokenizer, split='valid')
     #train_set = EnwikiDataset(split="train")
     #valid_set = EnwikiDataset(split="valid")
     train_loader = DataLoader(train_set, batch_size=args.batch_size, shuffle=True)
     valid_loader = DataLoader(valid_set, batch_size=1, shuffle=True)
     model = MySpikeGPT()
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.01)
+    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=0.000)
     total_itr = args.epoch * (len(train_loader) // args.batch_size + 1)
     lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, total_itr)
         

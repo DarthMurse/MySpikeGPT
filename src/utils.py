@@ -1,9 +1,15 @@
 from torch.utils.data import Dataset
+from torch.nn import functional as F
 import torch
 import os 
 from typing import List, Tuple
+from tokenizers import Tokenizer
+from tokenizers.models import BPE
+from tokenizers.trainers import BpeTrainer
+from tokenizers.pre_tokenizers import Whitespace
 from transformers import PreTrainedTokenizerFast
 from datasets import load_from_disk
+from tqdm import tqdm
 
 from .args import *
 
@@ -74,6 +80,7 @@ class EnwikiDataset(Dataset):
                 self.text = self.text[int(0.95 * n): ]
             else:
                 print("Invalid split name {split}! Please check again.")
+
             # Save to disk
             with open(self.root_path+self.name+'.'+split, 'w') as f:
                 f.write(self.text)
@@ -100,9 +107,6 @@ class WikitextDataset(Dataset):
             print("Loading original dataset ... "+name+"."+split)
             with open('datasets/'+name+'.'+split, 'r') as f:
                 text = f.read()
-            for i in range(len(text)):
-                if text[i] == ' ' and i+1 < len(text) and text[i+1] == '\n' and i >= 1 and text[i-1] == '\n':
-                    text = text[:i] + '<|endoftext|>' + text[i+1:]
             self.tokens = self.tokenizer.encode(text)
             torch.save(self.tokens, 'datasets/'+name+'.preprocessed.'+split)
 
@@ -118,25 +122,79 @@ class WikitextDataset(Dataset):
 class LambadaDataset(Dataset):
     def __init__(self, tokenizer, ctx_len=args.ctx_len, split="train"):
         self.dataset = load_from_disk("datasets/lambada/"+split)
+        self.split = split
+        self.ctx_len = ctx_len
+        self.tokenizer = tokenizer
+        self.tokens = []
+        if self.split == "train":
+            if os.path.exists("datasets/lambada.preprocessed.train"):
+                self.tokens = torch.load("datasets/lambada.preprocessed.train")
+            else:
+                for i in tqdm(range(len(self.dataset))):
+                    if i == 0:
+                        seq = self.dataset[0]['text']
+                    else:
+                        seq = "<|endoftext|>" + self.dataset[i]['text']
+                #print(seq.encode("utf-8"))
+                    self.tokens.extend(self.tokenizer.encode(seq))
+                torch.save(self.tokens, "datasets/lambada.preprocessed.train")
+        print("Loading complete!")
 
     def __len__(self):
-        pass
+        if self.split == "train":
+            return (len(self.tokens) - self.ctx_len - 1)
+        else:
+            return len(self.dataset)
 
     def __getitem__(self, idx):
-        pass
+        if self.split == "train":
+            x = self.tokens[idx: idx+self.ctx_len]
+            y = self.tokens[idx+1: idx+self.ctx_len+1]
+            x, y = torch.tensor(x), torch.tensor(y)
+            return x, y
+        else:
+            token_seq = self.tokenizer.encode(self.dataset[idx]['text'])
+            x = token_seq[:-1]
+            y = token_seq[-1]
+            x, y = torch.tensor(x), torch.tensor(y).unsqueeze(0)
+            length = x.shape[0]
+            if length < self.ctx_len:
+                x = F.pad(x, (0, self.ctx_len - length), 'constant', 2)
+                y = F.pad(y, (0, 1), 'constant', length)
+            return x, y
 
 if __name__ == "__main__":
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file="20B_tokenizer.json")
+    tokenizer = PreTrainedTokenizerFast(tokenizer_file="lambada.json")
+    '''
+    dataset = load_from_disk("datasets/lambada/train")
+    text = "[SEP]".join(dataset["text"])
+    training_corpus = (
+        text[i : i + 1000]
+        for i in range(0, len(text), 1000)
+    )
 
-    #train_set = WikitextDataset(tokenizer, split='train')
-    #valid_set = WikitextDataset(tokenizer, split='valid')
-    #test_set = WikitextDataset(tokenizer, split='test')
-    train_set = EnwikiDataset(split="train")
-    valid_set = EnwikiDataset(split="valid")
-    test_set = EnwikiDataset(split="test")
+    tokenizer = Tokenizer(BPE(unk_token="[UNK]"))
+    trainer = BpeTrainer(special_tokens=["[UNK]", "[CLS]", "PAD", '[MASK]'])
+    #tokenizer.pre_tokenizer = Whitespace()
+    #files = [f"datasets/wiki103.{split}" for split in ["test", "train", "valid"]]
+    tokenizer.train_from_iterator(training_corpus, trainer)
+    tokenizer.save("lambada.json")
+    '''
+    #train_set = WikitextDataset(tokenizer, name="wiki103", split='train')
+    #valid_set = WikitextDataset(tokenizer, name="wiki103", split='valid')
+    #test_set = WikitextDataset(tokenizer, name="wiki103", split='test')
+    #train_set = EnwikiDataset(split="train")
+    #valid_set = EnwikiDataset(split="valid")
+    #test_set = EnwikiDataset(split="test")
     
     #print(f"test_set[0]: x and y, length: {test_set[0][0].shape[0]}, ctx_len: {args.ctx_len}")
     #print(test_set[0][0])
     #print(test_set[0][1])
 
-    #train_set = LambadaDataset("validation")
+    #train_set = LambadaDataset(tokenizer, split="train")
+    #print(train_set[0])
+    test_set = LambadaDataset(tokenizer, split="test")
+    id = 2
+    print(test_set[id])
+    print(tokenizer.decode(test_set[id][0]))
+    print(tokenizer.decode(test_set[id][1][0]))

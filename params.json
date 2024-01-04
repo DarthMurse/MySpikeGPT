@@ -2,10 +2,10 @@
 	"ctx_len": 1024,
 	"n_layers": 12,
 	"embed": 768,
-	"vocab_size": 50277,
+	"vocab_size": 30000,
 	"n_heads": 12,
 	"T": 1,
-	"batch_size": 18,
+	"batch_size": 12,
 	"lr": 1e-4,
 	"epoch": 1
 }
