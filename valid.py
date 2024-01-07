@@ -37,15 +37,16 @@ def sample_top_p(probs, p):
 def BPC(model, valid_set, tokenizer, model_args=args):
     model.eval()
     valid_loader = DataLoader(valid_set, batch_size=1, shuffle=True)
-    total_count = 100
+    total_count = 10
     total_loss = 0
     loss_fn = nn.CrossEntropyLoss()
     temperature = 1.0
     top_p = 0.9
     acc = 0
+    loss = 0
 
     with torch.no_grad():
-        #'''
+        '''
         for i, (x, y) in tqdm(enumerate(valid_loader), total=total_count, desc=f"total_count: {total_count}, current_loss: {total_loss}"):
             if  i >= total_count:
                 break 
@@ -69,7 +70,7 @@ def BPC(model, valid_set, tokenizer, model_args=args):
         print('--------------------------------------------------------------')
         output = initial_input
         idx = 1
-        max_gen_len = 1000
+        max_gen_len = 50
         i = 0
         while i <= max_gen_len:
             pred = model(initial_input.unsqueeze(0))
@@ -81,21 +82,21 @@ def BPC(model, valid_set, tokenizer, model_args=args):
             initial_input = output[i+1:]
             i += 1
         print("output: " + tokenizer.decode(output))
-        '''
+        #'''
 
     return loss 
 
 if __name__ == "__main__":
     model_args = args
 
-    from src.QuantModel import MySpikeGPT
+    from src.model import MySpikeGPT
     model_name = 'ANN_models/'+sys.argv[1]+'/model.pth'
 
     model = MySpikeGPT(model_args).to(model_args.device)
     checkpoint = torch.load(model_name, map_location='cpu')
-    model.load_state_dict(checkpoint)
+    model.load_state_dict(checkpoint, strict=False)
     tokenizer = PreTrainedTokenizerFast(tokenizer_file='lambada.json')
-    valid_set = LambadaDataset(tokenizer, split="test")
+    valid_set = LambadaDataset(tokenizer, split="train")
     #valid_set = WikitextDataset(tokenizer, split="train")
     #tokenizer = MyTokenizer("char_book.json", model_args.ctx_len)
     #valid_set = EnwikiDataset(split="test")

@@ -3,54 +3,54 @@ from torch import nn
 import torch.nn.functional as F 
 import math
 from typing import Optional, Tuple
+from einops import repeat
 
 from .args import *
 
+T_total = 2 ** 5 - 1
+time_step = T_total
+wait_time = T_total
 class IF(nn.Module):
-    def __init__(self, T=4, step=1, is_first=False):
+    def __init__(self, T=T_total, step=time_step):
         super().__init__()
         self.alpha = torch.nn.Parameter(torch.tensor(8.0))
         self.T = T
         self.step = step
-        self.is_first = is_first
 
     def forward(self, x):
         # x [T, B, S, D]
-        if self.is_first:
-            x.unsqueeze_(0)
-            x = x.repeat(self.T, 1, 1, 1)
-
+        device = torch.cuda.current_device()
         threshold = self.alpha
         membrane = 0.5 * threshold
-        spikes = torch.zeros(x.shape)
+        spikes = torch.zeros(x.shape).to(device)
 
-        for i in range(self.step):
-            membrane = membrane + x[i]
-        for i in range(0, self.T):
-            if i + self.step < self.T:
-                membrane = membrane + x[i + self.step]
-            spike = membrane > threshold
-            membrane[spike] = membrane[spike] - threshold
-            spikes[i+j] = spike.float()
+        for i in range(0, self.T, self.step):
+            for j in range(0, self.step):
+                membrane = membrane + x[i+j]
+            for j in range(0, self.step):
+                spike = membrane > threshold
+                membrane[spike] = membrane[spike] - threshold
+                spikes[i+j] = spike.float()
 
         return threshold * spikes
 
 class SpikeInnerProduct(nn.Module):
-    def __init__(self, T=4, step=1):
+    def __init__(self, T=T_total, step=time_step):
         super().__init__()
-        self.T = 4
-        self.step = 1
+        self.T = T
+        self.step = step
 
     def forward(self, x, y):
         T, B, n_heads, S, head_dim = x.shape
-        out_weight = torch.zeros([T, B, n_heads, S, S])
+        device = torch.cuda.current_device()
+        out_weight = torch.zeros([T, B, n_heads, S, S]).to(device)
         
         for i in range(0, self.T, self.step):
             x_add = 0
             y_add = 0
             for j in range(self.step):
-                x_add = x_add + x[i+j]
-                y_add = y_add + y[i+j]
+                x_add = x_add + x[i+j] / self.step
+                y_add = y_add + y[i+j] / self.step
             weight = x_add @ y_add
             for j in range(self.step):
                 out_weight[i+j] = weight
@@ -68,7 +68,7 @@ class MySpikeGPT(nn.Module):
         self.pos = nn.Parameter(torch.zeros([self.args.ctx_len, self.args.embed]))
         self.register_parameter('pos', self.pos)
 
-        self.init_spike = IF(step=4, is_first=True)
+        self.init_spike = IF(step=time_step)
 
         for i in range(self.args.n_layers):
             self.register_module('transformer_block'+str(i), self.transformer[i])
@@ -79,6 +79,7 @@ class MySpikeGPT(nn.Module):
         assert x.shape[1] == self.args.ctx_len, "input sequence length is not equal to ctx_len!"
         out = self.encode_layer(x)
         out = out + self.pos
+        out = repeat(out, "b s d -> t b s d", t=T_total)
         out = self.init_spike(out)
         for i in range(self.args.n_layers):
             out = self.transformer[i](out)
@@ -97,8 +98,8 @@ class TransformerBlock(nn.Module):
         self.args = model_args
         self.ffn = FFN(self.args)
         self.sdsa = SDSA(i, self.args)
-        #self.sdsa_norm = nn.LayerNorm(self.args.embed)
-        #self.ffn_norm = nn.LayerNorm(self.args.embed)
+        self.sdsa_norm = nn.LayerNorm(self.args.embed)
+        self.ffn_norm = nn.LayerNorm(self.args.embed)
 
         self.register_module('ffn', self.ffn)
         self.register_module('sdsa', self.sdsa)
@@ -107,8 +108,9 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x):
         # x: [B, S, D], out: [B, S, D]
-        h = x + self.sdsa(x)
-        out = h + self.ffn(h)
+        x_real = x.mean(dim=0)
+        h_real = x_real + self.sdsa(repeat(self.sdsa_norm(x_real), 'b s l -> t b s l', t=T_total)).mean(dim=0)
+        out = repeat(h_real, 'b s l -> t b s l', t=T_total) + self.ffn(repeat(self.ffn_norm(x_real), 'b s l -> t b s l', t=T_total))
         return out 
 
 class SDSA(nn.Module):
@@ -124,13 +126,13 @@ class SDSA(nn.Module):
         self.wq = nn.Linear(self.dim, self.dim, bias=False)
         self.wo = nn.Linear(self.dim, self.dim, bias=False)
 
-        self.q_if = IF(step=4)
-        self.k_if = IF(step=4)
-        self.v_if = IF(step=4)
-        self.o_if = IF(step=4)
-        self.softmax_if = IF(step=4)
-        self.weight_if = IF(step=4)
-        self.inner_prodcut = SpikeInnerProduct(step=4)
+        self.q_if = IF(step=time_step)
+        self.k_if = IF(step=time_step)
+        self.v_if = IF(step=time_step)
+        self.o_if = IF(step=time_step)
+        self.softmax_if = IF(step=time_step)
+        self.weight_if = IF(step=time_step)
+        self.inner_product = SpikeInnerProduct(step=time_step)
 
         #self.freq_cis = precompute_freqs_cis(self.head_dim, self.args.ctx_len)
 
@@ -152,18 +154,18 @@ class SDSA(nn.Module):
         Q = self.q_if(Q)
         V = self.v_if(V)
 
-        QK = self.inner_product(Q, K) / math.sqrt(self.dim) # [T, B, n_heads, S, S]
+        QK = self.inner_product(Q, K.transpose(-1, -2)) / math.sqrt(self.dim) # [T, B, n_heads, S, S]
         mask = torch.full(
-                (1, 1, S, S), float("-inf"), device=self.args.device
+                (1, 1, 1, S, S), float("-inf"), device=self.args.device
             )
         mask = torch.triu(mask, diagonal=1).type_as(x)
         QK = QK + mask
-        QK = torch.softmax(QK, dim=-1) # [B, n_heads, S, S]
-        QK = self.softmax_if(QK)
-        QKV = QK @ V # [B, n_heads, S, head_dim]
+        QK = torch.softmax(QK, dim=-1) # [T, B, n_heads, S, S]
+        QK = QK.clamp(0, self.softmax_if.alpha.item())
+        QKV = QK @ V # [T, B, n_heads, S, head_dim]
 
-        QKV = QKV.transpose(2, 1)
-        QKV = QKV.reshape(B, S, -1)
+        QKV = QKV.transpose(2, 3)
+        QKV = QKV.reshape(T, B, S, -1)
         QKV = self.weight_if(QKV)
         QKV = self.wo(QKV)
         QKV = self.o_if(QKV)
@@ -176,9 +178,9 @@ class FFN(nn.Module):
         self.hidden = model_args.ffn_hidden_layer
         self.dim = model_args.embed 
         #self.spike1 = nn.SiLU()
-        self.spike1 = QuantReLU()
+        self.spike1 = IF(step=time_step)
         #self.init_spike = nn.SiLU()
-        self.init_spike = QuantReLU()
+        self.init_spike = IF(step=time_step)
         self.linear1 = nn.Linear(self.dim, self.hidden, bias=False)
         self.linear2 = nn.Linear(self.hidden, self.dim, bias=False)
         
@@ -202,4 +204,5 @@ class OutputLayer(nn.Module):
         #out = self.norm(x)
         #out = self.out_if(out)
         out = self.output(x)
+        out = out[:wait_time].mean(dim=0)
         return out

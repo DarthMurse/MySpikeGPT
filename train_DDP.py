@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import argparse
-from spikingjelly.activation_based import functional
 import functools
 from datasets import load_dataset
 from accelerate import Accelerator

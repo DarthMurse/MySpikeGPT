@@ -36,7 +36,7 @@ def act_quantization(b):
 class QuantReLU(nn.ReLU):
     def __init__(self):
         super().__init__()
-        self.bit = 16
+        self.bit = 6
         self.act_alq = act_quantization(self.bit)
         self.act_alpha = torch.nn.Parameter(torch.tensor(8.0))
 
@@ -85,8 +85,8 @@ class TransformerBlock(nn.Module):
         self.args = model_args
         self.ffn = FFN(self.args)
         self.sdsa = SDSA(i, self.args)
-        #self.sdsa_norm = nn.LayerNorm(self.args.embed)
-        #self.ffn_norm = nn.LayerNorm(self.args.embed)
+        self.sdsa_norm = nn.LayerNorm(self.args.embed)
+        self.ffn_norm = nn.LayerNorm(self.args.embed)
 
         self.register_module('ffn', self.ffn)
         self.register_module('sdsa', self.sdsa)
@@ -95,8 +95,8 @@ class TransformerBlock(nn.Module):
 
     def forward(self, x):
         # x: [B, S, D], out: [B, S, D]
-        h = x + self.sdsa(x)
-        out = h + self.ffn(h)
+        h = x + self.sdsa(self.sdsa_norm(x))
+        out = h + self.ffn(self.ffn_norm(h))
         return out 
 
 class SDSA(nn.Module):
